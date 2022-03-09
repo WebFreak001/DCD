@@ -64,16 +64,8 @@ int runServer(string[] args)
 	bool ignoreConfig;
 	string[] importPaths;
 	LogLevel level = globalLogLevel;
-	version(Windows)
-	{
-		bool useTCP = true;
-		string socketFile;
-	}
-	else
-	{
-		bool useTCP = false;
-		string socketFile = generateSocketName();
-	}
+	bool useTCP = false;
+	string socketFile = generateSocketName();
 
 	sharedLog.fatalHandler = () {};
 
@@ -115,12 +107,6 @@ int runServer(string[] args)
 	if (useTCP)
 		socketFile = null;
 
-	version (Windows) if (socketFile !is null)
-	{
-		fatal("UNIX domain sockets not supported on Windows");
-		return 1;
-	}
-
 	if (serverIsRunning(useTCP, socketFile, port))
 	{
 		fatal("Another instance of DCD-server is already running");
@@ -133,44 +119,49 @@ int runServer(string[] args)
 	if (!ignoreConfig)
 		importPaths ~= loadConfiguredImportDirs();
 
-	Socket socket;
+	Server server;
+	server.useTCP = useTCP;
 	if (useTCP)
 	{
-		socket = new TcpSocket(AddressFamily.INET);
-		socket.blocking = true;
-		socket.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, true);
-		socket.bind(new InternetAddress("localhost", port));
+		server.socket = new TcpSocket(AddressFamily.INET);
+		server.socket.blocking = true;
+		server.socket.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, true);
+		server.socket.bind(new InternetAddress("localhost", port));
+		server.socket.listen(32);
 		info("Listening on port ", port);
 	}
 	else
 	{
 		version(Windows)
 		{
-			fatal("UNIX domain sockets not supported on Windows");
-			return 1;
+			server.isLocalSocket = true;
+			server.localSocket = localSocket
+					.messagePackets
+					.maxClients(10)
+					.createServer(socketFile);
+			info("Listening on ", server.localSocket.fullAddress);
 		}
 		else
 		{
-			socket = new Socket(AddressFamily.UNIX, SocketType.STREAM);
+			server.socket = new Socket(AddressFamily.UNIX, SocketType.STREAM);
 			if (exists(socketFile))
 			{
 				info("Cleaning up old socket file at ", socketFile);
 				remove(socketFile);
 			}
-			socket.blocking = true;
-			socket.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, true);
-			socket.bind(new UnixAddress(socketFile));
+			server.socket.blocking = true;
+			server.socket.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, true);
+			server.socket.bind(new UnixAddress(socketFile));
 			setAttributes(socketFile, S_IRUSR | S_IWUSR);
+			server.socket.listen(32);
 			info("Listening at ", socketFile);
 		}
 	}
-	socket.listen(32);
 
 	scope (exit)
 	{
 		info("Shutting down sockets...");
-		socket.shutdown(SocketShutdown.BOTH);
-		socket.close();
+		server = Peer.init;
 		if (!useTCP)
 			remove(socketFile);
 		info("Sockets shut down.");
@@ -197,28 +188,9 @@ int runServer(string[] args)
 
 	serverLoop: while (true)
 	{
-		auto s = socket.accept();
-		s.blocking = true;
-
-		if (useTCP)
-		{
-			// Only accept connections from localhost
-			IPv4Union actual;
-			InternetAddress clientAddr = cast(InternetAddress) s.remoteAddress();
-			actual.i = clientAddr.addr;
-			// Shut down if somebody tries connecting from outside
-			if (actual.i != expectedClient.i)
-			{
-				fatal("Connection attempted from ", clientAddr.toAddrString());
-				return 1;
-			}
-		}
-
-		scope (exit)
-		{
-			s.shutdown(SocketShutdown.BOTH);
-			s.close();
-		}
+		auto s = server.accept();
+		if (s == Peer.init)
+			continue;
 
 		ptrdiff_t bytesReceived = s.receive(buffer);
 

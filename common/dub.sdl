@@ -5,4 +5,5 @@ sourcePaths "src"
 importPaths "src"
 
 dependency "msgpack-d" version="1.0.1"
+dependency "localsocket" path="../../LocalSocket"
 versions "built_with_dub"

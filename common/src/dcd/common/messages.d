@@ -21,6 +21,7 @@ module dcd.common.messages;
 import std.socket;
 import msgpack;
 import core.time : dur;
+import localsocket;
 
 /**
  * The type of completion list being returned
@@ -195,36 +196,129 @@ struct AutocompleteResponse
 	}
 }
 
+struct Peer
+{
+	bool isLocalSocket;
+	union
+	{
+		Socket socket;
+		PacketLocalSocketClient localSocket;
+	}
+
+	@disable this(this);
+
+	~this()
+	{
+		if (!isLocalSocket)
+		{
+			socket.shutdown(SocketShutdown.BOTH);
+			socket.close();
+		}
+	}
+
+	bool send(ubyte[] message)
+	{
+		if (isLocalSocket)
+			return socket.send(message) == message.length;
+		else
+			return !localSocket.sendPacket(message).hasError;
+	}
+}
+
+struct Server
+{
+	bool isLocalSocket;
+	bool useTCP;
+	union
+	{
+		Socket socket;
+		PacketLocalSocketServer localSocket;
+	}
+
+	@disable this(this);
+
+	~this()
+	{
+		if (!isLocalSocket)
+		{
+			socket.shutdown(SocketShutdown.BOTH);
+			socket.close();
+		}
+	}
+
+	Peer accept()
+	{
+		Peer peer;
+		if (isLocalSocket)
+		{
+			peer.isLocalSocket = true;
+			auto remote = localSocket.accept();
+			if (remote.hasError)
+				return Peer.init;
+			peer.localSocket = move(remote.value);
+			return move(peer);
+		}
+		s.blocking = true;
+
+		if (useTCP)
+		{
+			// Only accept connections from localhost
+			IPv4Union actual;
+			InternetAddress clientAddr = cast(InternetAddress) s.remoteAddress();
+			actual.i = clientAddr.addr;
+			// Shut down if somebody tries connecting from outside
+			if (actual.i != expectedClient.i)
+			{
+				fatal("Connection attempted from ", clientAddr.toAddrString());
+				return 1;
+			}
+		}
+
+		return move(peer);
+	}
+}
+
 /**
  * Returns: true on success
  */
-bool sendRequest(Socket socket, AutocompleteRequest request)
+bool sendRequest(ref Peer peer, AutocompleteRequest request)
 {
 	ubyte[] message = msgpack.pack(request);
 	ubyte[] messageBuffer = new ubyte[message.length + message.length.sizeof];
 	auto messageLength = message.length;
 	messageBuffer[0 .. size_t.sizeof] = (cast(ubyte*) &messageLength)[0 .. size_t.sizeof];
 	messageBuffer[size_t.sizeof .. $] = message[];
-	return socket.send(messageBuffer) == messageBuffer.length;
+	return peer.send(messageBuffer);
 }
 
 /**
  * Gets the response from the server
  */
-AutocompleteResponse getResponse(Socket socket)
+AutocompleteResponse getResponse(ref Peer peer)
 {
 	ubyte[1024 * 16] buffer;
 	ptrdiff_t bytesReceived = 0;
 	auto unpacker = StreamingUnpacker([]);
 
-	do {
-		bytesReceived = socket.receive(buffer);
-		if (bytesReceived == Socket.ERROR)
-			throw new Exception(lastSocketError);
-		if (bytesReceived == 0)
-			break;
-		unpacker.feed(buffer[0..bytesReceived]);
-	} while (true);
+	if (peer.isLocalSocket)
+	{
+		auto result = peer.localSocket.receivePacket(buffer[],
+			chunk => unpacker.feed(chunk));
+
+		if (result.hasError)
+			throw new Exception("Error occurred while receiving packet: " ~ result.error);
+	}
+	else
+	{
+		do {
+			bytesReceived = socket.receive(buffer);
+			if (bytesReceived == Socket.ERROR)
+				throw new Exception(lastSocketError);
+			if (bytesReceived == 0)
+				break;
+			unpacker.feed(buffer[0..bytesReceived]);
+		} while (true);
+	}
 
 	if (unpacker.size == 0)
 		throw new Exception("Server closed the connection, 0 bytes received");
@@ -239,7 +333,7 @@ AutocompleteResponse getResponse(Socket socket)
  * Returns: true if a server instance is running
  * Params:
  *     useTCP = `true` to check a TCP port, `false` for UNIX domain socket
- *     socketFile = the file name for the UNIX domain socket
+ *     socketFile = the file name for the UNIX domain socket or pipe name for windows pipes
  *     port = the TCP port
  */
 bool serverIsRunning(bool useTCP, string socketFile, ushort port)
@@ -248,32 +342,41 @@ bool serverIsRunning(bool useTCP, string socketFile, ushort port)
 		return false;
 	AutocompleteRequest request;
 	request.kind = RequestKind.query;
-	Socket socket;
-	scope (exit)
-	{
-		socket.shutdown(SocketShutdown.BOTH);
-		socket.close();
-	}
-	version(Windows) useTCP = true;
-	if (useTCP)
-	{
-		socket = new TcpSocket(AddressFamily.INET);
-		socket.connect(new InternetAddress("localhost", port));
-	}
-	else
-	{
-		version(Windows) {} else
-		{
-			socket = new Socket(AddressFamily.UNIX, SocketType.STREAM);
-			socket.connect(new UnixAddress(socketFile));
-		}
-	}
-	socket.setOption(SocketOptionLevel.SOCKET, SocketOption.RCVTIMEO, dur!"seconds"(5));
-	socket.blocking = true;
-	if (sendRequest(socket, request))
-		return getResponse(socket).completionType == "ack";
+	scope peer = connectToServer(useTCP, socketFile, port);
+	if (sendRequest(peer, request))
+		return getResponse(peer).completionType == "ack";
 	else
 		return false;
+}
+
+Peer connectToServer(bool useTCP, string socketFile, ushort port)
+{
+	Peer peer;
+	if (useTCP)
+	{
+		peer.socket = new TcpSocket(AddressFamily.INET);
+		peer.socket.connect(new InternetAddress("localhost", port));
+		peer.socket.setOption(SocketOptionLevel.SOCKET, SocketOption.RCVTIMEO, dur!"seconds"(5));
+		peer.socket.blocking = true;
+	}
+	else
+	{
+		version(Windows)
+		{
+			peer.isLocalSocket = true;
+			peer.localSocket = localSocket
+					.messagePackets
+					.connect(socketFile);
+		}
+		else
+		{
+			peer.socket = new Socket(AddressFamily.UNIX, SocketType.STREAM);
+			peer.socket.connect(new UnixAddress(socketFile));
+			peer.socket.setOption(SocketOptionLevel.SOCKET, SocketOption.RCVTIMEO, dur!"seconds"(5));
+			peer.socket.blocking = true;
+		}
+	}
+	return move(peer);
 }
 
 /// Escapes \n, \t and \ in the string. If `single` is true \t won't be escaped.

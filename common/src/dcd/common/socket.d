@@ -27,6 +27,7 @@ version (OSX) version = haveUnixSockets;
 version (linux) version = haveUnixSockets;
 version (BSD) version = haveUnixSockets;
 version (FreeBSD) version = haveUnixSockets;
+version (Windows) version = haveLocalSocket;
 
 enum DEFAULT_PORT_NUMBER = 9166;
 
@@ -43,6 +44,10 @@ string generateSocketName()
 			return xdg is null ? buildPath("/", "tmp", socketFileName) : buildPath(xdg,
 				"dcd.socket");
 		}
+	}
+	else version (haveLocalSocket)
+	{
+		return "dcd-socket";
 	}
 	else
 	{

@@ -69,16 +69,8 @@ int runClient(string[] args)
 	bool localUse;
 	bool fullOutput;
 	string search;
-	version(Windows)
-	{
-		bool useTCP = true;
-		string socketFile;
-	}
-	else
-	{
-		bool useTCP = false;
-		string socketFile = generateSocketName();
-	}
+	bool useTCP = false;
+	string socketFile = generateSocketName();
 
 	try
 	{
@@ -113,12 +105,6 @@ int runClient(string[] args)
 		return 0;
 	}
 
-	version (Windows) if (socketFile !is null)
-	{
-		fatal("UNIX domain sockets not supported on Windows");
-		return 1;
-	}
-
 	// If the user specified a port number, assume that they wanted a TCP
 	// connection. Otherwise set the port number to the default and let the
 	// useTCP flag deterimen what to do later.
@@ -149,9 +135,8 @@ int runClient(string[] args)
 		request.kind = RequestKind.shutdown;
 		else if (clearCache)
 			request.kind = RequestKind.clearCache;
-		Socket socket = createSocket(socketFile, port);
-		scope (exit) { socket.shutdown(SocketShutdown.BOTH); socket.close(); }
-		return sendRequest(socket, request) ? 0 : 1;
+		scope peer = createPeer(socketFile, port);
+		return sendRequest(peer, request) ? 0 : 1;
 	}
 	else if (addedImportPaths.length > 0 || removedImportPaths.length > 0)
 	{
@@ -161,9 +146,8 @@ int runClient(string[] args)
 			.map!(a => absolutePath(a)).array;
 		if (cursorPos == size_t.max)
 		{
-			Socket socket = createSocket(socketFile, port);
-			scope (exit) { socket.shutdown(SocketShutdown.BOTH); socket.close(); }
-			if (!sendRequest(socket, request))
+			scope peer = createPeer(socketFile, port);
+			if (!sendRequest(peer, request))
 				return 1;
 			return 0;
 		}
@@ -171,10 +155,9 @@ int runClient(string[] args)
 	else if (listImports)
 	{
 		request.kind |= RequestKind.listImports;
-		Socket socket = createSocket(socketFile, port);
-		scope (exit) { socket.shutdown(SocketShutdown.BOTH); socket.close(); }
-		sendRequest(socket, request);
-		AutocompleteResponse response = getResponse(socket);
+		scope peer = createPeer(socketFile, port);
+		sendRequest(peer, request);
+		AutocompleteResponse response = getResponse(peer);
 		printImportList(response);
 		return 0;
 	}
@@ -235,12 +218,11 @@ int runClient(string[] args)
 		request.kind |= RequestKind.autocomplete;
 
 	// Send message to server
-	Socket socket = createSocket(socketFile, port);
-	scope (exit) { socket.shutdown(SocketShutdown.BOTH); socket.close(); }
-	if (!sendRequest(socket, request))
+	auto peer = createPeer(socketFile, port);
+	if (!sendRequest(peer, request))
 		return 1;
 
-	AutocompleteResponse response = getResponse(socket);
+	AutocompleteResponse response = getResponse(peer);
 
 	if (symbolLocation)
 		printLocationResponse(response);
@@ -317,43 +299,20 @@ Options:
 
     --port PORTNUMBER | -p PORTNUMBER
         Uses PORTNUMBER to communicate with the server instead of the default
-        port 9166. Only used on Windows or when the --tcp option is set.
+        port 9166. Only used when the --tcp option is set.
 
     --tcp
-        Send requests on a TCP socket instead of a UNIX domain socket. This
-        switch has no effect on Windows.
+        Send requests on a TCP socket instead of a UNIX domain socket or named
+        pipe.
 
-    --socketFile FILENAME
-        Use the given FILENAME as the path to the UNIX domain socket. Using
-        this switch is an error on Windows.`, programName);
+    --socketFile NAME
+        On POSIX: Use the given file NAME as the path to the UNIX domain socket.
+        On Windows: The name to use for the named pipe, without host prefix`, programName);
 }
 
-Socket createSocket(string socketFile, ushort port)
+Peer createPeer(string socketFile, ushort port)
 {
-	import core.time : dur;
-
-	Socket socket;
-	if (socketFile is null)
-	{
-		socket = new TcpSocket(AddressFamily.INET);
-		socket.connect(new InternetAddress("localhost", port));
-	}
-	else
-	{
-		version(Windows)
-		{
-			// should never be called with non-null socketFile on Windows
-			assert(false);
-		}
-		else
-		{
-			socket = new Socket(AddressFamily.UNIX, SocketType.STREAM);
-			socket.connect(new UnixAddress(socketFile));
-		}
-	}
-	socket.setOption(SocketOptionLevel.SOCKET, SocketOption.RCVTIMEO, dur!"seconds"(5));
-	socket.blocking = true;
-	return socket;
+	return connectToServer(socketFile is null, socketFile, port);
 }
 
 void printDocResponse(ref const AutocompleteResponse response)
