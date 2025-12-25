@@ -9,14 +9,14 @@ jobs:
       fail-fast: false
       matrix:
         # use older ubuntu / linux version for glibc compatibility
-        os: [ubuntu-22.04, windows-latest]
-        dc:
-          - ldc-latest
-        arch:
-          - x86_64
+        dc: [ldc-latest]
         include:
-          - os: macos-latest
-            arch: aarch64
+          - { os: ubuntu-22.04, arch: x86_64 }
+          - { os: ubuntu-22.04-arm, arch: aarch64 }
+          - { os: windows-latest, arch: x86_64 }
+          - { os: windows-11-arm, arch: aarch64 }
+          - { os: macos-latest, arch: x86_64 }
+          - { os: macos-latest, arch: aarch64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
